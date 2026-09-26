@@ -1,0 +1,29 @@
+[Unit]
+Description=Pocket-Wealth - financial analysis specialist service
+Documentation=file:///home/sob/pocket-wealth/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=sob
+WorkingDirectory=/home/sob/pocket-wealth
+ExecStart=/usr/bin/python3 -m wealth.service
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+EnvironmentFile=/home/sob/pocket-wealth/.env
+
+# Financial records are among the most sensitive data Pocket holds - narrower than
+# Doc/Strix's own hardening on purpose. ReadWritePaths is the one path this service
+# can touch at all; everything else on the system is off limits even if the process
+# is compromised.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/sob/pocket-wealth/data
+
+[Install]
+WantedBy=default.target
