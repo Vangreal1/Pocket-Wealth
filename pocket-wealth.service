@@ -5,7 +5,6 @@ After=network.target
 
 [Service]
 Type=simple
-User=sob
 WorkingDirectory=/home/sob/pocket-wealth
 ExecStart=/usr/bin/python3 -m wealth.service
 Restart=on-failure
@@ -15,15 +14,18 @@ StandardError=journal
 
 EnvironmentFile=/home/sob/pocket-wealth/.env
 
-# Financial records are among the most sensitive data Pocket holds - narrower than
-# Doc/Strix's own hardening on purpose. ReadWritePaths is the one path this service
-# can touch at all; everything else on the system is off limits even if the process
-# is compromised.
+# ProtectSystem=strict/ProtectHome=true + ReadOnlyPaths/ReadWritePaths were the original,
+# stronger intent here (financial records are among the most sensitive data Pocket holds) but
+# failed outright on this host's rootless `systemctl --user` instance - every combination
+# tried exited 200/CHDIR ("Changing to the requested working directory failed: No such file or
+# directory"), even with WorkingDirectory itself listed in ReadOnlyPaths. Confirmed via a direct
+# test (2026-09-26): removing just those directives fixed it immediately, so it's a real
+# limitation of this host/kernel's unprivileged user-namespace support for user-manager
+# services, not a typo in the unit file. NoNewPrivileges/PrivateTmp don't need that namespace
+# remapping and work fine alone. Revisit ProtectSystem/ProtectHome if this ever moves to a
+# system-level (root-managed) unit instead of a user one.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/home/sob/pocket-wealth/data
 
 [Install]
 WantedBy=default.target
