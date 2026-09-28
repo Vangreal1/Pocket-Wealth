@@ -23,15 +23,26 @@ Standalone, local-first financial analysis service intended to sit behind Pocket
 
 ## Run locally
 
-Requires Python 3.11+. No third-party dependencies.
+Requires Python 3.11+ and `sqlcipher3-binary` (see requirements.txt) - the database is
+encrypted at rest (AES-256 via SQLCipher, added 2026-09-28), which is the one third-party
+dependency this service has. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+if you don't already have a venv here.
 
 ```bash
 export WEALTH_TOKEN='replace-with-a-long-random-secret'
 export WEALTH_DB='/path/to/private/wealth.sqlite3'
-python3 -m wealth.service
+export WEALTH_DB_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+.venv/bin/python3 -m wealth.service
 ```
 
-Default bind is `127.0.0.1:8788`. Authenticated `GET /health` and `GET /capabilities` support service checks and Foreman discovery. Optional, separate 32+ character secrets gate sensitive operations: `WEALTH_SOURCE_TOKEN` for sourced market ingestion (`X-Wealth-Source-Token`), `WEALTH_APPROVAL_TOKEN` for saving reviewed transactions (`X-Wealth-Approval-Token`), and `WEALTH_DATA_TOKEN` for export/erasure (`X-Wealth-Data-Token`). Without a corresponding token, that HTTP action is disabled. These secrets must be distinct from `WEALTH_TOKEN` and must never be passed through model-generated text. Do not expose the service to a network or reuse Pocket's user-facing authentication. Keep tokens in a protected systemd environment file, not in source control. Protect the database and backups at rest; the app does not implement database encryption.
+`WEALTH_DB_KEY` must be exactly 64 hex characters (a raw 256-bit key, not a human passphrase -
+generate it once and keep it with your other secrets; losing it means losing access to the
+database, same as losing any other encryption key). A brand-new `WEALTH_DB` is created encrypted
+from the start; migrating an existing plaintext database needs SQLCipher's own
+`ATTACH ... KEY ...; SELECT sqlcipher_export(...)` pattern first (see wealth/service.py's
+`_connect()` for the exact key format it expects).
+
+Default bind is `127.0.0.1:8788`. Authenticated `GET /health` and `GET /capabilities` support service checks and Foreman discovery. Optional, separate 32+ character secrets gate sensitive operations: `WEALTH_SOURCE_TOKEN` for sourced market ingestion (`X-Wealth-Source-Token`), `WEALTH_APPROVAL_TOKEN` for saving reviewed transactions (`X-Wealth-Approval-Token`), and `WEALTH_DATA_TOKEN` for export/erasure (`X-Wealth-Data-Token`). Without a corresponding token, that HTTP action is disabled. These secrets must be distinct from `WEALTH_TOKEN` and must never be passed through model-generated text. Do not expose the service to a network or reuse Pocket's user-facing authentication. Keep tokens (including `WEALTH_DB_KEY`) in a protected systemd environment file, not in source control. The database itself is encrypted at rest; backups and exports (`export_user_data`) are not encrypted by this service and should be protected separately.
 
 Example request:
 
@@ -45,6 +56,6 @@ Submit data with the actions in `CONTRACT.md`. `CAPABILITIES.md` maps the workin
 
 ## Handoff / production gaps
 
-Claude Code should map `CONTRACT.md` to Foreman's actual task model, register the service, configure systemd and Pocket's Functions UI, and add authentication/authorization appropriate to the live stack. Before handling real financial records, add encrypted storage or encrypted-volume deployment, backup restore tests, retention rules for backups/exports, and bank-specific statement adapters with user review. The `approved` flag and its separate gateway credential must originate from a Pocket confirmation flow, not from model-generated text. The gateway credentials do not prove which user initiated the request; Foreman must bind `user_id` to Pocket's authenticated session. No API credentials, bank connections, payment movement, live trading, or automatic investment decisions are included.
+Claude Code should map `CONTRACT.md` to Foreman's actual task model, register the service, configure systemd and Pocket's Functions UI, and add authentication/authorization appropriate to the live stack. The database itself is encrypted at rest now (AES-256 via SQLCipher); still outstanding before handling real financial records at scale: backup restore tests, retention rules for backups/exports (which are not themselves encrypted by this service), and bank-specific statement adapters with user review. The `approved` flag and its separate gateway credential must originate from a Pocket confirmation flow, not from model-generated text. The gateway credentials do not prove which user initiated the request; Foreman must bind `user_id` to Pocket's authenticated session. No API credentials, bank connections, payment movement, live trading, or automatic investment decisions are included.
 
 Trading roadmap: read-only market data → reproducible backtests → automated strategies within the paper environment → separately reviewed live-trading adapter with per-order confirmation, independent hard limits and kill switch. The current paper portfolio accepts simulated manually priced orders only. Never treat the language model's generated text as executable broker instructions.

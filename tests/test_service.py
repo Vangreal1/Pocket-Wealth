@@ -17,6 +17,7 @@ class ServiceTests(unittest.TestCase):
             server.data_token = "d" * 40
             server.approval_token = "a" * 40
             server.db_path = os.path.join(directory, "wealth.db")
+            server.db_key = "a" * 64
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:

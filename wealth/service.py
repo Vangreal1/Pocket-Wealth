@@ -2,10 +2,33 @@
 import hmac
 import json
 import os
-import sqlite3
+import re
+# sqlcipher3's dbapi2 module is a drop-in for the stdlib's sqlite3 (same DB-API 2.0 surface,
+# same Error/OperationalError hierarchy) - it's the stdlib sqlite3 C code plus SQLCipher's
+# transparent AES-256 page encryption. See _connect() below for how the key gets applied; every
+# other line in this file that says "sqlite3" needs no other change to get real at-rest
+# encryption (data/wealth.sqlite3 was plaintext before 2026-09-28 - see GAP_PLAN.md).
+from sqlcipher3 import dbapi2 as sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .core import execute, initialize
+
+_HEX_KEY = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _connect(db_path, key, timeout=5):
+    """Opens an AES-256-encrypted SQLCipher connection. key is a raw 256-bit key, 64 hex
+    characters - SQLCipher's `x'...'` raw-key syntax, not a passphrase run through its own KDF:
+    the key is already machine-generated, high-entropy, and never typed by a person, so there's
+    nothing for a passphrase-style key-derivation step to usefully add. PRAGMA key can't take a
+    bound `?` parameter (it isn't DML) - the hex-format check above is what keeps this string
+    interpolation safe, not escaping."""
+    if not _HEX_KEY.match(key):
+        raise ValueError("WEALTH_DB_KEY must be exactly 64 hex characters (a raw 256-bit key)")
+    db = sqlite3.connect(db_path, timeout=timeout)
+    db.execute(f"PRAGMA key = \"x'{key}'\"")
+    return db
+
 
 MAX_BODY = 65536
 CAPABILITIES = {
@@ -76,7 +99,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not source_token or not hmac.compare_digest(
                         self.headers.get("X-Wealth-Source-Token", ""), source_token):
                     return self.respond(403, {"status": "error", "error": "trusted source connector required"})
-            with sqlite3.connect(self.server.db_path, timeout=5) as db:
+            with _connect(self.server.db_path, self.server.db_key) as db:
                 initialize(db)
                 result = execute(db, payload)
             self.respond(200, result)
@@ -93,12 +116,16 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     token = os.environ.get("WEALTH_TOKEN", "")
     db_path = os.environ.get("WEALTH_DB", "")
+    db_key = os.environ.get("WEALTH_DB_KEY", "")
     if len(token) < 32 or not db_path or not os.path.isabs(db_path):
         raise SystemExit("Set WEALTH_TOKEN (32+ chars) and absolute WEALTH_DB path")
-    with sqlite3.connect(db_path) as db:
+    if not _HEX_KEY.match(db_key):
+        raise SystemExit("Set WEALTH_DB_KEY to a 64-character hex string (a raw 256-bit key)")
+    with _connect(db_path, db_key) as db:
         initialize(db)
     server = ThreadingHTTPServer(("127.0.0.1", 8788), Handler)
     server.token = token
+    server.db_key = db_key
     source_token = os.environ.get("WEALTH_SOURCE_TOKEN", "")
     if source_token and (len(source_token) < 32 or source_token == token):
         raise SystemExit("WEALTH_SOURCE_TOKEN must be distinct and at least 32 characters")

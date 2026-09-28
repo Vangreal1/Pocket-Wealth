@@ -6,7 +6,10 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/home/sob/pocket-wealth
-ExecStart=/usr/bin/python3 -m wealth.service
+# Dedicated venv (added 2026-09-28) for sqlcipher3-binary - the AES-256 encryption-at-rest
+# dependency (see wealth/service.py's _connect()). System python3 has no pip on this host, and
+# every other Wealth dependency was stdlib-only until this, so there was no venv before.
+ExecStart=/home/sob/pocket-wealth/.venv/bin/python3 -m wealth.service
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
