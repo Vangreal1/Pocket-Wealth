@@ -3,7 +3,8 @@ import csv
 import hashlib
 import io
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from . import profile
 
 
@@ -126,24 +127,142 @@ def add_transactions(db, user, data):
             "review_required": dry_run}
 
 
+def _parse_amount_cents(raw, label="amount"):
+    cleaned = str(raw).strip().replace(",", "").replace("$", "")
+    if cleaned.startswith("(") and cleaned.endswith(")"):
+        cleaned = "-" + cleaned[1:-1]  # some exports parenthesize negatives: "(42.50)"
+    if not cleaned:
+        raise ValueError(f"{label} is empty")
+    try:
+        decimal_value = Decimal(cleaned)
+    except InvalidOperation as exc:
+        raise ValueError(f"{label} {raw!r} is not a valid amount") from exc
+    return int((decimal_value * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _parse_mapped_date(raw, date_format, label="posted_on"):
+    raw = str(raw).strip()
+    if date_format:
+        try:
+            return datetime.strptime(raw, date_format).date().isoformat()
+        except ValueError as exc:
+            raise ValueError(f"{label} {raw!r} does not match date_format {date_format!r}") from exc
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"{label} {raw!r} is not ISO format (YYYY-MM-DD) - "
+                         "set mapping.date_format (e.g. \"%m/%d/%Y\")") from exc
+
+
+def _mapped_column(row, mapping, key, required=True):
+    column = mapping.get(key)
+    if not column:
+        if required:
+            raise ValueError(f"mapping.{key} is required")
+        return None
+    if column not in row:
+        raise ValueError(f"CSV has no column named {column!r} (mapping.{key})")
+    return row[column]
+
+
+def map_bank_csv(csv_text, mapping, rows_limit=200):
+    """Converts an arbitrary bank's CSV export into Wealth's own transaction row schema, given a
+    per-import column mapping - the bank's own headers, date format, and amount convention never
+    need to match Wealth's internal names. See README.md "Importing a bank statement" for the
+    full mapping schema and worked examples of each amount_mode.
+
+    Deliberately a pure function (csv_text + mapping in, rows out) with no db/user - the actual
+    save still goes through add_transactions()'s existing validation, de-duplication, and
+    dry-run/approval gating unchanged, so a mapped import gets exactly the same review step and
+    duplicate-detection guarantees a manual one does."""
+    if not isinstance(mapping, dict):
+        raise ValueError("mapping must be an object")
+    mode = mapping.get("amount_mode")
+    if mode not in {"signed", "debit_credit", "unsigned_with_type"}:
+        raise ValueError("mapping.amount_mode must be 'signed', 'debit_credit', or 'unsigned_with_type'")
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if not reader.fieldnames:
+        raise ValueError("CSV has no header row")
+    date_format = mapping.get("date_format")
+    category_column = mapping.get("category")
+    account_column = mapping.get("account_id_column")
+    literal_account = mapping.get("account_id")
+    if not account_column and not literal_account:
+        raise ValueError("mapping.account_id (a literal) or mapping.account_id_column is required")
+    source_id_column = mapping.get("source_id")
+    rows = []
+    for raw_row in reader:
+        if len(rows) >= rows_limit:
+            raise ValueError(f"CSV exceeds {rows_limit} rows")
+        posted_on = _parse_mapped_date(_mapped_column(raw_row, mapping, "posted_on"), date_format)
+        description = _mapped_column(raw_row, mapping, "description")
+        category = (raw_row.get(category_column, "") or "").strip() if category_column else ""
+        account_id = raw_row[account_column] if account_column else literal_account
+
+        if mode == "signed":
+            amount = _parse_amount_cents(_mapped_column(raw_row, mapping, "amount_column"))
+            negative_means = mapping.get("negative_means", "expense")
+            if negative_means not in {"expense", "income"}:
+                raise ValueError("mapping.negative_means must be 'expense' or 'income'")
+            other = "income" if negative_means == "expense" else "expense"
+            direction = negative_means if amount < 0 else other
+            amount_cents = abs(amount)
+        elif mode == "debit_credit":
+            debit_raw = (_mapped_column(raw_row, mapping, "debit_column") or "").strip()
+            credit_raw = (_mapped_column(raw_row, mapping, "credit_column") or "").strip()
+            if debit_raw and credit_raw:
+                raise ValueError(f"row has both a debit and a credit value ({debit_raw!r}, {credit_raw!r})")
+            if debit_raw:
+                amount_cents, direction = abs(_parse_amount_cents(debit_raw, "debit_column")), "expense"
+            elif credit_raw:
+                amount_cents, direction = abs(_parse_amount_cents(credit_raw, "credit_column")), "income"
+            else:
+                raise ValueError("row has neither a debit nor a credit value")
+        else:  # unsigned_with_type
+            amount_cents = abs(_parse_amount_cents(_mapped_column(raw_row, mapping, "amount_column")))
+            type_value = (_mapped_column(raw_row, mapping, "type_column") or "").strip().lower()
+            expense_values = {v.lower() for v in mapping.get("expense_values", [])}
+            income_values = {v.lower() for v in mapping.get("income_values", [])}
+            if type_value in expense_values:
+                direction = "expense"
+            elif type_value in income_values:
+                direction = "income"
+            else:
+                raise ValueError(f"type value {type_value!r} matches neither expense_values nor income_values")
+
+        mapped = {"posted_on": posted_on, "amount_cents": amount_cents, "direction": direction,
+                 "category": category or "uncategorized", "description": description, "account_id": account_id}
+        if source_id_column:
+            mapped["source_id"] = _mapped_column(raw_row, mapping, "source_id")
+        rows.append(mapped)
+    return rows
+
+
 def import_csv(db, user, data):
     if not isinstance(data, dict):
         raise ValueError("data must be an object")
     body = data.get("csv_text")
     if not isinstance(body, str) or not body or len(body) > 50000:
         raise ValueError("csv_text must be 1–50000 characters")
-    reader = csv.DictReader(io.StringIO(body))
-    required = {"posted_on", "amount_cents", "direction", "category", "description", "account_id"}
-    if not reader.fieldnames or not required.issubset(reader.fieldnames):
-        raise ValueError("CSV needs posted_on,amount_cents,direction,category,description,account_id headers")
-    rows = []
-    for row in reader:
-        if len(rows) >= 200:
-            raise ValueError("CSV exceeds 200 rows")
-        if None in row:
-            raise ValueError("CSV row has extra columns")
-        row["amount_cents"] = int(row["amount_cents"]) if row["amount_cents"].isdigit() else row["amount_cents"]
-        rows.append(row)
+    mapping = data.get("mapping")
+    if mapping is not None:
+        # A bank's own CSV, with a per-import column mapping (see map_bank_csv's docstring) -
+        # converted to Wealth's own schema, then handled identically to the branch below.
+        rows = map_bank_csv(body, mapping)
+    else:
+        reader = csv.DictReader(io.StringIO(body))
+        required = {"posted_on", "amount_cents", "direction", "category", "description", "account_id"}
+        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            raise ValueError("CSV needs posted_on,amount_cents,direction,category,description,account_id "
+                             "headers, or a mapping (see README.md \"Importing a bank statement\")")
+        rows = []
+        for row in reader:
+            if len(rows) >= 200:
+                raise ValueError("CSV exceeds 200 rows")
+            if None in row:
+                raise ValueError("CSV row has extra columns")
+            row["amount_cents"] = int(row["amount_cents"]) if row["amount_cents"].isdigit() else row["amount_cents"]
+            rows.append(row)
     return add_transactions(db, user, {"rows": rows, "dry_run": data.get("dry_run", True),
                                        "approved": data.get("approved", False), "format": "csv"})
 

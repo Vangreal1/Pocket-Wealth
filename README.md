@@ -54,6 +54,41 @@ curl -H "Authorization: Bearer $WEALTH_TOKEN" -H 'Content-Type: application/json
 
 Submit data with the actions in `CONTRACT.md`. `CAPABILITIES.md` maps the working features; `GAP_PLAN.md` details the path to the wider product. `ui/QUOTE_WIDGET.md` describes the desktop/phone component and stream contract. Only a trusted local caller should assign `user_id`. Use `python3 -m unittest discover -s tests -v` to run tests.
 
+## Importing a bank statement
+
+`import_csv` accepts a raw CSV export from any bank via an optional `mapping` - the bank's own
+column names, date format, and amount convention never need to match Wealth's internal schema
+(added 2026-09-28, see `wealth/features.py`'s `map_bank_csv`). Without `mapping`, the CSV must
+already use Wealth's own headers (`posted_on,amount_cents,direction,category,description,account_id`).
+
+A mapped import still goes through the exact same `dry_run`/`approved` review and duplicate
+detection as any other import - it's only a format conversion, not a separate save path.
+
+Required in every `mapping`: `posted_on` (the date column name), `description` (the description
+column name), `amount_mode`, and either `account_id` (a literal, used for every row - the normal
+case for a single-account statement) or `account_id_column` (pulls it per-row, for a combined
+multi-account export). `category` is optional (falls back to `"uncategorized"`); `date_format`
+is optional (a `datetime.strptime` format string; omit it if the bank's dates are already ISO
+`YYYY-MM-DD`). Amounts tolerate `$`, thousands separators, and parenthesized negatives.
+
+`amount_mode` is one of:
+- **`signed`** - one amount column, sign indicates direction. Needs `amount_column`. Negative
+  means expense by default; set `negative_means: "income"` if a bank does it backwards.
+- **`debit_credit`** - two separate columns. Needs `debit_column` and `credit_column`; exactly
+  one must have a value per row.
+- **`unsigned_with_type`** - one always-positive amount column plus a separate type column.
+  Needs `amount_column`, `type_column`, `expense_values`, and `income_values` (lists of the
+  type column's own values, matched case-insensitively).
+
+Example - a typical single-amount-column bank export:
+
+```json
+{"csv_text": "Date,Amount,Description\n01/20/2026,-15.75,Coffee Shop\n01/21/2026,2000.00,Paycheck\n",
+ "mapping": {"posted_on": "Date", "date_format": "%m/%d/%Y", "description": "Description",
+             "account_id": "checking", "amount_mode": "signed", "amount_column": "Amount"},
+ "dry_run": true}
+```
+
 ## Handoff / production gaps
 
 Claude Code should map `CONTRACT.md` to Foreman's actual task model, register the service, configure systemd and Pocket's Functions UI, and add authentication/authorization appropriate to the live stack. The database itself is encrypted at rest now (AES-256 via SQLCipher); still outstanding before handling real financial records at scale: backup restore tests, retention rules for backups/exports (which are not themselves encrypted by this service), and bank-specific statement adapters with user review. The `approved` flag and its separate gateway credential must originate from a Pocket confirmation flow, not from model-generated text. The gateway credentials do not prove which user initiated the request; Foreman must bind `user_id` to Pocket's authenticated session. No API credentials, bank connections, payment movement, live trading, or automatic investment decisions are included.

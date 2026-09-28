@@ -2,7 +2,7 @@
 
 ## 1. Reliable financial feed
 
-Add institution-specific statement import adapters and user review, then consent-based read-only account connections. Plaid's Transactions Sync supports cursor-based incremental updates; its product documentation also lists investments and liabilities for holdings/loan data. Build connector interfaces so users can stay manual or replace a provider. Track permission scope, refresh time, account identity, corrections, removals and deduplication. Store access tokens outside the LLM and encrypt private data and backups.
+Statement import chose a generic mapped CSV importer over institution-specific adapters (2026-09-28, `import_csv`'s `mapping` parameter - see README.md "Importing a bank statement"): one column-mapping schema covers any bank's own CSV export (date format, amount convention) with no per-institution code to write or maintain, at the cost of one-time manual mapping per bank. Live, consent-based read-only account connections (e.g. Plaid) remain a distinct, much larger future option if manual export ever becomes the wrong tradeoff - not pursued now. Plaid's Transactions Sync supports cursor-based incremental updates; its product documentation also lists investments and liabilities for holdings/loan data. Track permission scope, refresh time, account identity, corrections, removals and deduplication if that path is ever taken. Store access tokens outside the LLM and encrypt private data and backups.
 
 References for one possible U.S. market provider: https://plaid.com/docs/api/products/transactions/ and https://plaid.com/docs/ . Choose connector providers per user's country and institution, including their consent and data residency terms.
 
